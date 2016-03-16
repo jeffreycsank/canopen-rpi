@@ -117,3 +117,130 @@ sudo apt-get install python3-rpi.gpio
     * `sudo update-rc.d canopen-master defaults`
 
 9. Reboot: `sudo reboot`
+
+HTTP to CAN API
+========================
+* The HTTP to CAN API uses the HTTP/1.1 protocol's GET method.
+* Telemetry responses use the [server-side event API](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)
+
+Telemetry
+---------
+When the host URL is accessed without query string parameters, a `text/event-stream` is opened and CAN traffic is streamed as JSON-encoded data-only events.  The JSON objects shall have the following attribute-value pairs:
+* `bus`: Which CAN bus message was received (if multiple; 0 or 1 e.g.)
+* `id`: 11-bit CAN identifier, in base 10
+* `data`: Array of CAN data bytes (0-8 bytes), in base 10
+* `ts`: ISO 8601 time-stamp of when the CAN message was received
+
+*Note: This assumes the events can be supplied faster than CAN frames are received.  It is suggested that CAN frames be buffered, and an `error` event sent if the buffer overflows (see Errors section).*
+
+**Example**
+
+Request: `GET / HTTP/1.1`
+
+Response: (one data-only event per CAN frame)
+```
+HTTP/1.1 200 OK
+Access-Control-Origin: *
+Content-Type: text/event-stream
+Cache-Control: no-cache
+
+data:{"bus": 0, "id": 123, "data":[255,128,5], "ts":"2015-12-21T10:36:30.123Z"}
+
+data:{"bus": 1, "id": 157, "data":[], "ts":"2015-12-21T10:36:56.789Z"}
+```
+
+Commands
+--------
+When the host URL is accessed with a valid set of query string arguments listed below, the command is translated to a CAN frame.
+* `id`: The 11-bit CAN identifier, in base 10
+* `data`: A JSON-encoded array of CAN data bytes (in base 10), having a length of 0-8.
+
+**Example**
+
+Request: `GET /?id=123&data=[255,128,5] HTTP/1.1`
+
+Response:
+```
+HTTP/1.1 204 No Content
+Access-Control-Allow-Origin: *
+
+```
+
+Errors
+======
+
+If no query string is present, and the state of the CAN bus (or busses) are abnormal, an `error` event is streamed (once) if "bus-off" or a `warning` event if "error warning" (error count exceeds a threshold).  A `notice` event is streamed if the bus (or busses) return to a normal state.
+
+**Example**
+
+Request: `GET / HTTP/1.1`
+
+Response:
+```
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *
+Content-Type: text/event-stream
+Cache-Control: no-cache
+
+event: error
+data: Bus 0 is in the bus-off state
+
+event: warning
+data: Bus 1 is in the warning state
+
+event: notice
+data: Bus 1 is now in a normal state
+
+event: error
+data: CAN RX buffer overflow
+
+```
+
+If a query string is present, but the required command parameters do not exist or are invalid, then an HTTP 400 code shall be returned.  All other errors shall be formatted per the [JSON API](http://jsonapi.org/format/#error-objects).
+
+
+**Example**
+
+Request:
+
+`GET /?badargument=1 HTTP/1.1` or
+
+`GET /?id=123 HTTP/1.1` (no data parameter) or
+
+`GET /?id=4096&data=[] HTTP/1.1` (invalid id) or
+
+`GET /?id=123&data=[256] HTTP/1.1` (invalid data byte) or
+
+`GET /?id=123&data=[0,0,0,0,0,0,0,0,0]` (too many data bytes)
+
+Response:
+```
+HTTP/1.1 400 Bad Request
+Access-Control-Allow-Origin: *
+
+```
+
+**Example**
+
+Request `GET /?id=123&data[] HTTP/1.1`
+
+Response:
+```
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *
+
+{"errors":[{"detail":"Message sent on bus 0, but bus 1 is in the bus-off state"}]}
+
+```
+
+**Example**
+
+Request `GET /?id=123&data=[] HTTP/1.1`
+
+Response:
+```
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *
+
+{"errors":[{"detail":"Application-specific error message"}]}
+```
