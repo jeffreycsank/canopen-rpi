@@ -11,11 +11,9 @@ import RPi.GPIO as GPIO
 import signal
 import socket
 from subprocess import CalledProcessError, check_output
-from threading import Timer
+from threading import Event, Thread, Timer
 from time import sleep, time
 from sys import exit
-
-DEFAULT_CAN_DEVICE = "can1"
 
 PIN_ENABLE_N = 42
 PIN_ADDRESS_N = list(range(34, 41))
@@ -42,6 +40,22 @@ class CANopenIndicator:
     def setState(self, state):
         self._pwm.ChangeDutyCycle(state.get('DutyCycle'))
         self._pwm.ChangeFrequency(state.get('Frequency'))
+
+class IntervalTimer(Thread):
+    def __init__(self, interval, function, args=None, kwargs=None):
+        if args is None:
+            args = []
+        if kwargs is None:
+            kwargs = {}
+        super().__init__(args=args, kwargs=kwargs)
+        self.stopped = Event()
+        self.function = function
+        self.interval = interval
+    def run(self):
+        while not self.stopped.wait(self.interval):
+            self.function(*self._args, **self._kwargs)
+    def cancel(self):
+        self.stopped.set()
 
 class ResetNode(Exception):
     pass
@@ -94,72 +108,61 @@ def get_error_indicator_state(device):
     return indicator_state
 
 def process_error_indicators():
-    global error_indicator_timer, errled0, errled1
+    global errled0, errled1
     state = get_error_indicator_state('can1')
     errled0.setState(get_error_indicator_state("can1"))
     errled1.setState(get_error_indicator_state("can0"))
-    error_indicator_timer = Timer(1, process_error_indicators)
-    error_indicator_timer.start()
 
 def process_sync():
     global canopen_od, sync_timer
     is_sync_producer = (canopen_od.get(CANopen.ODI_SYNC).get(CANopen.ODSI_VALUE) & 0x40000000) != 0;
-    sync_time = canopen_od.get(CANopen.ODI_SYNC_TIME).get(CANopen.ODSI_VALUE)
-    if is_sync_producer and sync_time != 0 and sync_timer is None:
-        sync_timer = Timer(sync_time / 1000000, send_sync)
-        sync_timer.start()
-    elif sync_time == 0 and type(sync_timer) is Timer:
+    sync_time = canopen_od.get(CANopen.ODI_SYNC_TIME).get(CANopen.ODSI_VALUE) / 1000000
+    if sync_timer is not None and (sync_time != sync_timer.interval or nmt_state == CANopen.NMT_STATE_STOPPED):
         sync_timer.cancel()
-        sync_timer = None
+    if is_sync_producer and sync_time != 0 and nmt_state != CANopen.NMT_STATE_STOPPED and (sync_timer is None or not sync_timer.is_alive()):
+        sync_timer = IntervalTimer(sync_time, send_sync)
+        sync_timer.start()
 
-def send_sync(async=False):
-    global bus, sync_timer
-    sync_id = canopen_od.get(CANopen.ODI_SYNC).get(CANopen.ODSI_VALUE) & 0x3FF;
+def send_sync():
+    global bus, canopend_od
+    sync_id = canopen_od.get(CANopen.ODI_SYNC).get(CANopen.ODSI_VALUE) & 0x3FF
     frame = CAN.Frame(sync_id)
     bus.send(frame)
-    if (not async) and (sync_timer is not None):
-        sync_timer = None
-        process_sync()
 
 def send_bootup():
-    global bus
+    global bus, node_id
     frame = CAN.Frame((CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL << CANopen.FUNCTION_CODE_BITNUM) + node_id)
     bus.sendall(frame)
 
 def process_heartbeat_producer():
     global canopen_od, heartbeat_producer_timer
-    heartbeat_time = canopen_od.get(CANopen.ODI_HEARTBEAT_PRODUCER_TIME).get(CANopen.ODSI_VALUE)
-    if heartbeat_time != 0 and heartbeat_producer_timer is None:
-        heartbeat_producer_timer = Timer(heartbeat_time / 1000, send_heartbeat)
-        heartbeat_producer_timer.start()
-    elif heartbeat_time == 0 and heartbeat_producer_timer is not None:
+    heartbeat_time = canopen_od.get(CANopen.ODI_HEARTBEAT_PRODUCER_TIME).get(CANopen.ODSI_VALUE) / 1000
+    if heartbeat_producer_timer is not None and heartbeat_time != heartbeat_producer_timer.interval:
         heartbeat_producer_timer.cancel()
-        heartbeat_producer_timer = None
+    if heartbeat_time != 0 and (heartbeat_producer_timer is None or not heartbeat_producer_timer.is_alive()):
+        heartbeat_producer_timer = IntervalTimer(heartbeat_time, send_heartbeat)
+        heartbeat_producer_timer.start()
 
 def send_heartbeat():
-    global bus, heartbeat_producer_timer, node_id, nmt_state
+    global bus, node_id, nmt_state
     frame = CAN.Frame((CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL << CANopen.FUNCTION_CODE_BITNUM) + node_id, [nmt_state])
     bus.send(frame)
-    heartbeat_producer_timer = None
-    process_heartbeat_producer()
 
 def heartbeat_consumer_timeout(id):
-    global bus, canopen_od, node_id
-    frame = CAN.Frame((CANopen.FUNCTION_CODE_EMCY << CANopen.FUNCTION_CODE_BITNUM) + node_id, (CANopen.EMCY_HEARTBEAT_BY_NODE + id).to_bytes(2, byteorder='big') + canopen_od.get(CANopen.ODI_ERROR).get(CANopen.ODSI_VALUE).to_bytes(1, byteorder='big') + b'\x00\x00\x00\x00\x00')
-    bus.send(frame)
+    global bus, canopen_od, nmt_state, node_id
+    if nmt_state != CANopen.NMT_STATE_STOPPED:
+        frame = CAN.Frame((CANopen.FUNCTION_CODE_EMCY << CANopen.FUNCTION_CODE_BITNUM) + node_id, (CANopen.EMCY_HEARTBEAT_BY_NODE + id).to_bytes(2, byteorder='big') + canopen_od.get(CANopen.ODI_ERROR).get(CANopen.ODSI_VALUE).to_bytes(1, byteorder='big') + b'\x00\x00\x00\x00\x00')
+        bus.send(frame)
 
 def reset_timers():
     global heartbeat_consumer_timers, heartbeat_producer_timer, sync_timer
     for i,t in heartbeat_consumer_timers.items():
         t.cancel()
     heartbeat_consumer_timers = {}
-    if type(heartbeat_producer_timer) is Timer:
+    if heartbeat_producer_timer is not None and heartbeat_producer_timer.is_alive():
         heartbeat_producer_timer.cancel()
-    heartbeat_producer_timer = None
-    if type(sync_timer) is Timer:
+    if sync_timer is not None and sync_timer.is_alive():
         sync_timer.cancel()
-    sync_timer = None
-
 
 signal.signal(signal.SIGTERM, sigterm_handler)
 
@@ -178,9 +181,11 @@ error_indicator_timer = None
 heartbeat_consumer_timers = {}
 heartbeat_producer_timer = None
 sync_timer = None
+
 bus = CAN.Bus(DEFAULT_CAN_DEVICE)
 
-process_error_indicators()
+error_indicator_timer = IntervalTimer(1, process_error_indicators)
+error_indicator_timer.start()
 
 while True:
     try:
@@ -252,10 +257,8 @@ while True:
                 set_nmt_state(CANopen.NMT_STATE_PREOPERATIONAL)
 
                 while True: # This block should really be intterupt driven by bus.recv()
-                    if heartbeat_producer_timer is None:
-                        process_heartbeat_producer()
-                    if sync_timer is None:
-                        process_sync()
+                    process_heartbeat_producer()
+                    process_sync()
                     try:
                         frame = bus.recv()
                     except CAN.BusDown:
@@ -329,7 +332,7 @@ while True:
                                 sdo_data = CANopen.SDO_ABORT_GENERAL # Don't see one specifically for sending not enough data bytes in the CAN frame (malformed SDO frame)
                             id = canopen_od.get(CANopen.ODI_SDO_SERVER).get(CANopen.ODSI_SDO_SERVER_DEFAULT_SCID)
                             sdo_data = sdo_data.to_bytes(4, byteorder='big')
-                            n = len(sdo_data)
+                            n = 4 - len(sdo_data)
                             data = [(scs << CANopen.SDO_SCS_BITNUM) + (n << CANopen.SDO_N_BITNUM) + (1 << CANopen.SDO_E_BITNUM) + (1 << CANopen.SDO_S_BITNUM), (odi >> 8), (odi & 0xFF), (odsi)] + list(sdo_data)
                             frame = CAN.Frame(id, data)
                             bus.send(frame)
