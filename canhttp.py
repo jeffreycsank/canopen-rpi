@@ -88,7 +88,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                             id = msg.arbitration_id
                             data = msg.data
                             data = ",".join(map(str, data))
-                            self.wfile.write(bytes('data: {"bus":"' + bus.name + '","id":' + str(id) + ',"data":[' + data + '],"ts":"' + datetime.now().isoformat() + '"}' + "\n\n", 'utf8'))
+                            self.wfile.write(bytes('data: {"bus":"' + bus.name + '","id":' + str(id) + ',"data":[' + data + '],"ts":"' + datetime.fromtimestamp(msg.timestamp).isoformat() + '"}' + "\n\n", 'utf8'))
                     except CAN.BusDown:
                         self.wfile.write(bytes('event: error' + "\n" + 'data: ' + bus.name + ' is down.' + "\n\n", 'utf-8'))
                         sleep(1)
