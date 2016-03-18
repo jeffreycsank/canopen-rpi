@@ -1,45 +1,110 @@
 #!/usr/bin/python3
 
-from array import array
 import errno
+from fcntl import ioctl
+import re
 import socket
 import struct
+from subprocess import CalledProcessError, check_output
 
-class Frame:
+class Message:
+
     FORMAT = "=IB3x8s"
     SIZE = struct.calcsize(FORMAT)
-    RTR_BITNUM = 30
-    def __init__(self, id, data = [], rtr = 0):
-        self.id = id
-        self.data = data
-        self.rtr = rtr
-    def to_bytes(self):
-        id = (self.rtr << self.RTR_BITNUM) + self.id
-        dlc = len(self.data)
-        data = array('B', self.data).tostring()
-        data = data.ljust(8, b'\x00')
-        return struct.pack(self.FORMAT, id, dlc, data)
 
-class Bus:
-    def __init__(self, device):
-        self._s = socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
-        self._s.bind((device,))
+    ERR_BITNUM = 29
+    RTR_BITNUM = 30
+    IDE_BITNUM = 31
+
+    ID_TYPE_STANDARD = False
+    ID_TYPE_EXTENDED = True
+
+    def __init__(self, arbitration_id, data=[], *args, **kwargs):
+
+        if 'dlc' in kwargs:
+            self.dlc = kwargs['dlc']
+        else:
+            self.dlc = len(data)
+
+        if 'id_type' in kwargs:
+            self.id_type = kwargs['id_type']
+        else:
+            self.id_type = bool((1 << self.IDE_BITNUM) & arbitration_id)
+
+        if 'is_remote_frame' in kwargs:
+            self.is_remote_frame = kwargs['is_remote_frame']
+        else:
+            self.is_remote_frame = bool((1 << self.RTR_BITNUM) & arbitration_id)
+
+        if 'is_error_frame' in kwargs:
+            self.is_error_frame = kwargs['is_error_frame']
+        else:
+            self.is_error_frame = bool((1 << self.ERR_BITNUM) & arbitration_id)
+
+        if 'timestamp' in kwargs:
+            self.timestamp = kwargs['timestamp']
+        else:
+            self.timestamp = None
+
+        self.arbitration_id = arbitration_id & 0x1FFFFFFF
+        self.data = bytearray(data)
+
+    def to_bytes(self):
+        arbitration_id = self.arbitration_id
+        if self.id_type:
+            arbitration_id |= self.IDE_BITNUM << 1
+        if self.is_remote_frame:
+            arbitration_id |= self.RTR_BITNUM << 1
+        if self.is_error_frame:
+            arbitration_id |= self.ERR_BITNUM << 1
+        data = self.data.ljust(8, b'\x00')
+        return struct.pack(self.FORMAT, arbitration_id, self.dlc, self.data)
+
+
+class Bus(socket.socket):
+
+    STATE_UNKNOWN = "UKNOWN"
+    STATE_ERROR_ACTIVE = "ERROR-ACTIVE"
+    STATE_ERROR_PASSIVE = "ERROR-PASSIVE"
+    STATE_BUS_OFF = "BUS-OFF"
+
+    def __init__(self, interface, name=None):
+        if name is None:
+            name = interface
+        self.name = name
+        super().__init__(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+        self.bind((interface,)) # Throws OSError if interface doesn't exist
+
+    def get_state(self):
+        interface, _ = self.getsockname()
+        try:
+            details = check_output(["ip", "-d", "link", "show", interface])
+        except CalledProcessError: # ip returned non-zero
+            return self.STATE_UNKNOWN
+        m = re.search('state ([^\s]+) restart-ms', str(details))
+        if m == None: # Not a valid can interface (could be vcan)
+            return self.STATE_UNKNOWN
+        return m.group(1)
+
     def recv(self):
         try:
-            frame = self._s.recv(Frame.SIZE)
+            msg = super().recv(Message.SIZE)
         except OSError as e:
             if e.errno == errno.ENETDOWN:
                 raise BusDown
-            raise e
-        id, dlc, data = struct.unpack(Frame.FORMAT, frame)
-        rtr = (id >> Frame.RTR_BITNUM) & 1
-        return Frame(id, data[:dlc], rtr)
-    def send(self, frame: Frame):
-        bytes_sent = self._s.send(frame.to_bytes())
-        return bytes_sent
-    def sendall(self, frame: Frame):
-        bytes_sent = self._s.sendall(frame.to_bytes())
-        return bytes_sent
+            raise
+        res = ioctl(self, 0x8906, struct.pack("@LL", 0, 0))
+        seconds, microseconds = struct.unpack("@LL", res)
+        timestamp = seconds + microseconds / 1000000
+        arbitration_id, dlc, data = struct.unpack(Message.FORMAT, msg)
+        return Message(arbitration_id, data[:dlc], timestamp=timestamp)
+
+    def send(self, msg: Message):
+        return super().send(msg.to_bytes())
+
+    def sendall(self, msg: Message):
+        return super().sendall(msg.to_bytes())
+
 
 class BusDown(Exception):
     pass

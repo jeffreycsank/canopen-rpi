@@ -1,28 +1,33 @@
 #!/usr/bin/python3
-# TODO: support multiple CAN busses.
-# Due to PCB layout error, can0 is connected to bus 1 and can1 to bus 0
-# so, telemetry is hard-coded with receiving on can0, although can1 is used
 import CAN
-from array import array
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from os import path
+from select import select
 import signal
 from socketserver import ThreadingMixIn
-import socket
-import struct
 import sys
 from time import sleep
 import traceback
 from urllib.parse import parse_qs, urlparse
 
-DEFAULT_CAN_DEVICE = "can1"
+DEFAULT_INTERFACE = "vcan0" # When no bus/interface is specified
+LISTEN_ON_INTERFACES = ["vcan0", "vcan1"] # Must be a list
 WWW_DIR = path.dirname(path.realpath(__file__))
 
 def sigterm_handler(signum, frame):
     sys.exit()
 
 def parse_request(request):
+    interface = request.get('bus')
+    if interface == None:
+        interface = DEFAULT_INTERFACE
+    else:
+        interface = interface[0]
+    try:
+        bus = CAN.Bus(interface)
+    except OSError:
+        raise BadRequest("bus '" + interface + "' does not exist")
     id = request.get('id')
     if id == None:
       raise BadRequest("id not specified")
@@ -31,7 +36,6 @@ def parse_request(request):
     if data == None:
         data = request.get('data') # GET
         if data == None:
-            #raise BadRequest("data not specified")
             data = [] # parse_url removes data field if empty array
         else:
             data = data[0].strip('[]').split(',')
@@ -39,8 +43,8 @@ def parse_request(request):
       if data[0] == '':
         data = []
     data = list(map(int, data))
-    frame = CAN.Frame(id, data)
-    return frame
+    msg = CAN.Message(id, data)
+    return (bus, msg)
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     pass
@@ -56,9 +60,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             # Command
             if parsed_path.query != '':
-                frame = parse_request(parse_qs(parsed_path.query))
-                bus = CAN.Bus(DEFAULT_CAN_DEVICE)
-                bus.send(frame)
+                bus, msg = parse_request(parse_qs(parsed_path.query))
+                bus.send(msg)
                 self.send_response(204);
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers();
@@ -72,22 +75,28 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
 
-                bus = CAN.Bus(DEFAULT_CAN_DEVICE)
+                busses = []
+                for interface in LISTEN_ON_INTERFACES:
+                    bus = CAN.Bus(interface)
+                    busses.append(bus)
+
                 while True:
                     try:
-                        frame = bus.recv()
+                        rlist, _, _ = select(busses, [], [])
+                        for bus in rlist:
+                            msg = bus.recv()
+                            id = msg.arbitration_id
+                            data = msg.data
+                            data = ",".join(map(str, data))
+                            self.wfile.write(bytes('data: {"bus":"' + bus.name + '","id":' + str(id) + ',"data":[' + data + '],"ts":"' + datetime.now().isoformat() + '"}' + "\n\n", 'utf8'))
                     except CAN.BusDown:
-                        self.wfile.write(bytes('event: error' + "\n" + 'data: ' + DEFAULT_CAN_DEVICE + ' is down.' + "\n\n", 'utf-8'))
+                        self.wfile.write(bytes('event: error' + "\n" + 'data: ' + bus.name + ' is down.' + "\n\n", 'utf-8'))
                         sleep(1)
                         continue
                     except SystemExit:
                         # This doesn't get called. Find a way if possible
                         self.wfile.write(bytes('event: error' + "\n" + 'data: System is shutting down.' + "\n\n", 'utf-8'))
                         raise
-                    id = frame.id
-                    data = frame.data
-                    data = ",".join(map(str, data))
-                    self.wfile.write(bytes('data: {"bus":"can0","id":' + str(id) + ',"data":[' + data + '],"ts":"' + datetime.now().isoformat() + '"}' + "\n\n", 'utf8'))
 
             # File
             filepath = WWW_DIR + self.path
@@ -124,7 +133,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             content_len = int(self.headers.get('content-length', 0)) # access POST body
             post_body = self.rfile.read(content_len) # read POST body
             post_body = post_body.decode('utf8')
-            frame = parse_request(parse_qs(post_body))
+            bus, frame = parse_request(parse_qs(post_body))
+            bus.send(frame)
             self.send_response(204)
             self.end_headers()
 

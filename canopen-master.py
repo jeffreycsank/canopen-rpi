@@ -6,14 +6,14 @@ import CAN
 import CANopen
 from functools import reduce
 from operator import xor
-import re
 import RPi.GPIO as GPIO
 import signal
-import socket
-from subprocess import CalledProcessError, check_output
 from threading import Event, Thread, Timer
 from time import sleep, time
 from sys import exit
+
+DEFAULT_CAN_INTERFACE = "vcan0"
+REDUNDANT_CAN_INTERFACE = "vcan1"
 
 PIN_ENABLE_N = 42
 PIN_ADDRESS_N = list(range(34, 41))
@@ -37,7 +37,7 @@ class CANopenIndicator:
         self._pwm = GPIO.PWM(channel, state.get('Frequency'))
         self._pwm.start(state.get('DutyCycle'))
 
-    def setState(self, state):
+    def set_state(self, state):
         self._pwm.ChangeDutyCycle(state.get('DutyCycle'))
         self._pwm.ChangeFrequency(state.get('Frequency'))
 
@@ -51,9 +51,11 @@ class IntervalTimer(Thread):
         self.stopped = Event()
         self.function = function
         self.interval = interval
+
     def run(self):
         while not self.stopped.wait(self.interval):
             self.function(*self._args, **self._kwargs)
+
     def cancel(self):
         self.stopped.set()
 
@@ -63,14 +65,14 @@ class ResetNode(Exception):
 class ResetCommunication(Exception):
     pass
 
-def sigterm_handler(signum, frame):
+def sigterm_handler(signum, msg):
     global error_indicator_timer, runled0, errled0, runled1, errled1
     reset_timers()
     error_indicator_timer.cancel()
-    runled0.setState(CANopenIndicator.OFF)
-    errled0.setState(CANopenIndicator.ON)
-    runled1.setState(CANopenIndicator.OFF)
-    errled1.setState(CANopenIndicator.ON)
+    runled0.set_state(CANopenIndicator.OFF)
+    errled0.set_state(CANopenIndicator.ON)
+    runled1.set_state(CANopenIndicator.OFF)
+    errled1.set_state(CANopenIndicator.ON)
     GPIO.cleanup()
     exit()
 
@@ -88,30 +90,22 @@ def set_nmt_state(state):
         indicator_state = CANopenIndicator.FLASH1
     else:
         indicator_state = CANopenIndicator.OFF
-    runled0.setState(indicator_state)
+    runled0.set_state(indicator_state)
 
-def get_error_indicator_state(device):
-    try:
-        can_details = check_output(["ip", "-d", "link", "show", device])
-    except CalledProcessError: # ip return non-zero, device does not exist
-        return "UNKNOWN"
-    m = re.search('can state ([^\s]+) restart-ms', str(can_details))
-    if m == None: # Not a valid can device
-        return "UNKNOWN"
-    err_state = m.group(1)
-    if err_state == "ERROR-ACTIVE":
+def get_error_indicator_state(bus):
+    err_state = bus.get_state()
+    if err_state == CAN.Bus.STATE_ERROR_ACTIVE:
         indicator_state = CANopenIndicator.OFF
-    elif err_state == "ERROR-PASSIVE":
+    elif err_state == CAN.Bus.STATE_ERROR_PASSIVE:
         indicator_state = CANopenIndicator.FLASH1
-    else: # BUS-OFF or unknown
+    else: # BUS-OFF or UNKNOWN
         indicator_state = CANopenIndicator.ON
     return indicator_state
 
 def process_error_indicators():
-    global errled0, errled1
-    state = get_error_indicator_state('can1')
-    errled0.setState(get_error_indicator_state("can1"))
-    errled1.setState(get_error_indicator_state("can0"))
+    global default_bus, redundant_bus, errled0, errled1
+    errled0.set_state(get_error_indicator_state(default_bus))
+    errled1.set_state(get_error_indicator_state(redundant_bus))
 
 def process_sync():
     global canopen_od, sync_timer
@@ -124,15 +118,15 @@ def process_sync():
         sync_timer.start()
 
 def send_sync():
-    global bus, canopend_od
+    global active_bus, canopen_od
     sync_id = canopen_od.get(CANopen.ODI_SYNC).get(CANopen.ODSI_VALUE) & 0x3FF
-    frame = CAN.Frame(sync_id)
-    bus.send(frame)
+    msg = CAN.Message(sync_id)
+    active_bus.send(msg)
 
 def send_bootup():
-    global bus, node_id
-    frame = CAN.Frame((CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL << CANopen.FUNCTION_CODE_BITNUM) + node_id)
-    bus.sendall(frame)
+    global active_bus, node_id
+    msg = CAN.Message((CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL << CANopen.FUNCTION_CODE_BITNUM) + node_id)
+    active_bus.sendall(msg)
 
 def process_heartbeat_producer():
     global canopen_od, heartbeat_producer_timer
@@ -144,15 +138,15 @@ def process_heartbeat_producer():
         heartbeat_producer_timer.start()
 
 def send_heartbeat():
-    global bus, node_id, nmt_state
-    frame = CAN.Frame((CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL << CANopen.FUNCTION_CODE_BITNUM) + node_id, [nmt_state])
-    bus.send(frame)
+    global active_bus, node_id, nmt_state
+    msg = CAN.Message((CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL << CANopen.FUNCTION_CODE_BITNUM) + node_id, [nmt_state])
+    active_bus.send(msg)
 
 def heartbeat_consumer_timeout(id):
-    global bus, canopen_od, nmt_state, node_id
+    global active_bus, canopen_od, nmt_state, node_id
     if nmt_state != CANopen.NMT_STATE_STOPPED:
-        frame = CAN.Frame((CANopen.FUNCTION_CODE_EMCY << CANopen.FUNCTION_CODE_BITNUM) + node_id, (CANopen.EMCY_HEARTBEAT_BY_NODE + id).to_bytes(2, byteorder='big') + canopen_od.get(CANopen.ODI_ERROR).get(CANopen.ODSI_VALUE).to_bytes(1, byteorder='big') + b'\x00\x00\x00\x00\x00')
-        bus.send(frame)
+        msg = CAN.Message((CANopen.FUNCTION_CODE_EMCY << CANopen.FUNCTION_CODE_BITNUM) + node_id, (CANopen.EMCY_HEARTBEAT_BY_NODE + id).to_bytes(2, byteorder='big') + canopen_od.get(CANopen.ODI_ERROR).get(CANopen.ODSI_VALUE).to_bytes(1, byteorder='big') + b'\x00\x00\x00\x00\x00')
+        active_bus.send(msg)
 
 def reset_timers():
     global heartbeat_consumer_timers, heartbeat_producer_timer, sync_timer
@@ -163,6 +157,7 @@ def reset_timers():
         heartbeat_producer_timer.cancel()
     if sync_timer is not None and sync_timer.is_alive():
         sync_timer.cancel()
+
 
 signal.signal(signal.SIGTERM, sigterm_handler)
 
@@ -182,7 +177,9 @@ heartbeat_consumer_timers = {}
 heartbeat_producer_timer = None
 sync_timer = None
 
-bus = CAN.Bus(DEFAULT_CAN_DEVICE)
+default_bus = CAN.Bus(DEFAULT_CAN_INTERFACE)
+redundant_bus = CAN.Bus(REDUNDANT_CAN_INTERFACE)
+active_bus = default_bus
 
 error_indicator_timer = IntervalTimer(1, process_error_indicators)
 error_indicator_timer.start()
@@ -256,18 +253,18 @@ while True:
                 send_bootup()
                 set_nmt_state(CANopen.NMT_STATE_PREOPERATIONAL)
 
-                while True: # This block should really be intterupt driven by bus.recv()
+                while True: # This block should really be intterupt driven by active_bus.recv()
                     process_heartbeat_producer()
                     process_sync()
                     try:
-                        frame = bus.recv()
+                        msg = active_bus.recv()
                     except CAN.BusDown:
                         sleep(1)
                         continue
                     ts = millitime()
-                    id = frame.id
-                    data = frame.data
-                    rtr = frame.rtr == 1
+                    id = msg.arbitration_id
+                    data = msg.data
+                    rtr = msg.is_remote_frame
                     fc = (id >> CANopen.FUNCTION_CODE_BITNUM) & 0xF
                     if rtr:
                         target_node = id & 0x7F
@@ -277,12 +274,12 @@ while True:
                                 for i in range(canopen_od.get(CANopen.ODI_TPDO1_MAPPING_PARAMETER).get(CANopen.ODSI_VALUE)):
                                     mapping = canopen_od.get(CANopen.ODI_TPDO1_MAPPING_PARAMETER).get(i + 1)
                                     data = data + canopen_od.get(mapping >> 16).get((mapping >> 8) & 0xFF).to_bytes((mapping & 0xFF) // 8, byteorder='big')
-                                frame = CAN.Frame((CANopen.FUNCTION_CODE_TPDO1 << CANopen.FUNCTION_CODE_BITNUM) + node_id, data)
-                                bus.send(frame)
+                                msg = CAN.Message((CANopen.FUNCTION_CODE_TPDO1 << CANopen.FUNCTION_CODE_BITNUM) + node_id, data)
+                                active_bus.send(msg)
                             elif fc == CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL:
                                 data = [nmt_state]
-                                frame = CAN.Frame((CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL << CANopen.FUNCTION_CODE_BITNUM) + node_id, data)
-                                bus.send(frame)
+                                msg = CAN.Message((CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL << CANopen.FUNCTION_CODE_BITNUM) + node_id, data)
+                                active_bus.send(msg)
                     elif fc == CANopen.FUNCTION_CODE_NMT:
                         command = id & 0x7F
                         if command == CANopen.NMT_NODE_CONTROL:
@@ -329,13 +326,13 @@ while True:
                                 odi = 0x0000
                                 odsi = 0x00
                                 scs = CANopen.SDO_CS_ABORT
-                                sdo_data = CANopen.SDO_ABORT_GENERAL # Don't see one specifically for sending not enough data bytes in the CAN frame (malformed SDO frame)
+                                sdo_data = CANopen.SDO_ABORT_GENERAL # Don't see one specifically for sending not enough data bytes in the CAN msg (malformed SDO msg)
                             id = canopen_od.get(CANopen.ODI_SDO_SERVER).get(CANopen.ODSI_SDO_SERVER_DEFAULT_SCID)
                             sdo_data = sdo_data.to_bytes(4, byteorder='big')
                             n = 4 - len(sdo_data)
                             data = [(scs << CANopen.SDO_SCS_BITNUM) + (n << CANopen.SDO_N_BITNUM) + (1 << CANopen.SDO_E_BITNUM) + (1 << CANopen.SDO_S_BITNUM), (odi >> 8), (odi & 0xFF), (odsi)] + list(sdo_data)
-                            frame = CAN.Frame(id, data)
-                            bus.send(frame)
+                            msg = CAN.Message(id, data)
+                            active_bus.send(msg)
                     elif fc == CANopen.FUNCTION_CODE_NMT_ERROR_CONTROL:
                         producer_id = id & 0x7F
                         if producer_id in heartbeat_consumer_timers:
