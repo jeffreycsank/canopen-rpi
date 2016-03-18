@@ -1,7 +1,7 @@
 About
 ==========
 
-This repository actually contains two programs that complement each other, but can be used independently.  The first is a CAN-to-HTTP webserver (`canhttp.py`) that translates CAN bus messages to a `text/event-stream`, and `HTTP GET` or `POST` requests into CAN bus messages.  The second is a CANopen Master node (`canopen-master.py`) that acts as a SYNC producer and Heartbeat consumer.  The code supports up to two CAN busses, and if only one is used, some minor modifications are necessary.
+This repository actually contains two programs that complement each other, but can be used independently.  The first is a CANopen Master node (`canopen-master.py`) that acts as a SYNC producer, Heartbeat consumer, and EMCY producer.  The second is a CAN-to-HTTP webserver (`canhttp.py`) that translates CAN bus messages to a `text/event-stream`, and `HTTP GET` or `POST` requests into CAN bus messages.  The code supports up to two CAN busses, and if only one is used, some minor modifications are necessary.
 
 Raspberry Pi Setup
 ==================
@@ -152,8 +152,8 @@ data:{"bus": 1, "id": 157, "data":[], "ts":"2015-12-21T10:36:56.789Z"}
 Commands
 --------
 When the host URL is accessed with a valid set of query string arguments listed below, the command is translated to a CAN frame.
-* `id`: The 11-bit CAN identifier, in base 10
-* `data`: A JSON-encoded array of CAN data bytes (in base 10), having a length of 0-8.
+* `id`: (required) The 11-bit CAN identifier, in base 10
+* `data`: (optional) A JSON-encoded array of CAN data bytes (in base 10), having a length of 0-8.
 
 **Example**
 
@@ -192,7 +192,7 @@ event: notice
 data: Bus 1 is now in a normal state
 
 event: error
-data: CAN RX buffer overflow
+data: CAN RX buffer overflow on bus 1
 
 ```
 
@@ -204,8 +204,6 @@ If a query string is present, but the required command parameters do not exist o
 Request:
 
 `GET /?badargument=1 HTTP/1.1` or
-
-`GET /?id=123 HTTP/1.1` (no data parameter) or
 
 `GET /?id=4096&data=[] HTTP/1.1` (invalid id) or
 
