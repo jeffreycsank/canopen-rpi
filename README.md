@@ -65,6 +65,8 @@ static ip_address=x.x.x.x/24
 Add CAN Support
 -----------------------------
 
+1. Connect MCP2515 circuit(s) to the Raspberry Pi `SPI0` bus.  Interrupt GPIOs are defined in step 4.
+
 1. If necessary, enable writable boot partition: `sudo mount -o remount,rw /dev/mmcblk0p1 /boot`
 
 1. Run `sudo raspi-config`
