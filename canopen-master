@@ -1,7 +1,7 @@
 #!/bin/sh
 
 ### BEGIN INIT INFO
-# Provides:          hkm
+# Provides:          canopen-master
 # Required-Start:    $remote_fs can_if $syslog $all
 # Required-Stop:     $remote_fs $syslog $all
 # Default-Start:     2 3 4 5
