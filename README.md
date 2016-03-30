@@ -51,13 +51,14 @@ options 8192cu rtw_power_mgnt=0 rtw_enusbss=0
 ```
 This will disable power management for 8192cu driver
 
-1. Configure wireless adapter and connect to nasaguest (required after each power-on)
-```
+* Configure wireless adapter and connect to nasaguest (required after each power-on)
+
+    ```
 sudo iwconfig wlan0 essid <WIFI_SSID>
 sudo dhclient wlan0
-````
+    ```
 
-2. If not using DHCP, set static IP address in `/etc/dhcpcd.conf`:
+* If not using DHCP, set static IP address in `/etc/dhcpcd.conf`:
 
     ```
 interface eth0
@@ -83,6 +84,7 @@ dtoverlay=mcp2515-can0-overlay,oscillator=16000000,interrupt=25
 dtoverlay=mcp2515-can1-overlay,oscillator=16000000,interrupt=24
 dtoverlay=spi-bcm2835-overlay
     ```
+    *Note: The `oscillator` and `interrupt` parameters may be different for your application.*
 
 3. Setup CAN interfaces
     * Manual
@@ -92,7 +94,8 @@ sudo ip link set can0 up type can bitrate 1000000
 sudo ip link set can1 up type can bitrate 1000000
     ```
     * Automatic (start at boot-up)
-        * Copy `can_if` to `/etc/init.d/` *(modified from [linux-can/can-misc](/linux-can/can-misc/blob/master/etc/can_if))*
+        * Copy [can_if](https://github.com/linux-can/can-misc/blob/master/etc/can_if) to `/etc/init.d/`
+        * Modify `can_if` line `CAN_IF=""` to `CAN_IF="can0@1000000,500 can1@1000000,5001"` *(may vary per application)*
         * `sudo update-rc.d can_if defaults`
         * `sudo reboot` or `sudo /etc/init.d/can_if start`
 
@@ -112,12 +115,12 @@ sudo apt-get install python3-rpi.gpio
     ````
 
 8. Setup webserver
-    * Copy contents of [GUI](/bggardne/AMPS-MoSS/tree/master/GUI) directory to `/home/pi/`
-    * Copy [canhttp.py](/bggardne/AMPS-MoSS/blob/master/RPi/canhttp.py) to `/home/pi/`
-    * Copy [canhttp](/bggardne/AMPS-MoSS/blob/master/RPi/canhttp) to `/etc/init.d/`
+    * Copy contents of [GUI](/GUI) directory to `/home/pi/`
+    * Copy [canhttp.py](/canhttp.py) to `/home/pi/`
+    * Copy [canhttp](/canhttp) to `/etc/init.d/`
     * `sudo update-rc.d canhttp defaults`
-    * Copy [canopen-master.py](/bggardne/AMPS-MoSS/blob/master/RPi/canopen-master.py) to `/home/pi/`
-    * Copy [canopen-master](/bggardne/AMPS-MoSS/blob/master/RPi/canopen-master) to `/etc/init.d/`
+    * Copy [canopen-master.py](/canopen-master.py) to `/home/pi/`
+    * Copy [canopen-master](/canopen-master) to `/etc/init.d/`
     * `sudo update-rc.d canopen-master defaults`
 
 9. Reboot: `sudo reboot`
