@@ -12,6 +12,8 @@ Install and Configure Raspbian
 
 1. Install the latest version of [Raspbian](https://www.raspberrypi.org/downloads/raspbian/).
 
+2. (Optional) Because of a [driver issue](https://github.com/raspberrypi/linux/issues/1317), you may need to add `dtoverlay=mmc` to `/boot/config.txt` for the Raspberry Pi to boot.
+
 2. (Optional) Run `sudo raspi-config` and adjust internationalization options.
 
 3. (Optional) Prevent flash memory corruption:
