@@ -1,7 +1,7 @@
 #!/bin/sh
 
 ### BEGIN INIT INFO
-# Provides:          hkm
+# Provides:          canhttp
 # Required-Start:    $remote_fs $syslog can_if $all
 # Required-Stop:     $remote_fs $syslog $all
 # Default-Start:     2 3 4 5
