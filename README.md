@@ -95,7 +95,7 @@ sudo ip link set can1 up type can bitrate 1000000
     ```
     * Automatic (start at boot-up)
         * Copy [can_if](https://github.com/linux-can/can-misc/blob/master/etc/can_if) to `/etc/init.d/`
-        * Modify `can_if` line `CAN_IF=""` to `CAN_IF="can0@1000000,500 can1@1000000,5001"` *(may vary per application)*
+        * Modify `can_if` line `CAN_IF=""` to `CAN_IF="can0@1000000,500 can1@1000000,500"` *(may vary per application)*
         * `sudo update-rc.d can_if defaults`
         * `sudo reboot` or `sudo /etc/init.d/can_if start`
 
