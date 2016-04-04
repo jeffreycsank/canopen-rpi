@@ -52,13 +52,17 @@ class Message:
     def to_bytes(self):
         arbitration_id = self.arbitration_id
         if self.id_type:
-            arbitration_id |= self.IDE_BITNUM << 1
+            arbitration_id |= 1 << self.IDE_BITNUM
         if self.is_remote_frame:
-            arbitration_id |= self.RTR_BITNUM << 1
+            arbitration_id |= 1 << self.RTR_BITNUM
         if self.is_error_frame:
-            arbitration_id |= self.ERR_BITNUM << 1
+            arbitration_id |= 1 << self.ERR_BITNUM
         data = self.data.ljust(8, b'\x00')
         return struct.pack(self.FORMAT, arbitration_id, self.dlc, self.data)
+
+    def from_bytes(b):
+        arbitration_id, dlc, data = struct.unpack(Message.FORMAT, b)
+        return Message(arbitration_id, data[:dlc])
 
 
 class Bus(socket.socket):
@@ -88,7 +92,7 @@ class Bus(socket.socket):
 
     def recv(self):
         try:
-            msg = super().recv(Message.SIZE)
+            data = super().recv(Message.SIZE)
         except OSError as e:
             if e.errno == errno.ENETDOWN:
                 raise BusDown
@@ -96,8 +100,9 @@ class Bus(socket.socket):
         res = ioctl(self, 0x8906, struct.pack("@LL", 0, 0))
         seconds, microseconds = struct.unpack("@LL", res)
         timestamp = seconds + microseconds / 1000000
-        arbitration_id, dlc, data = struct.unpack(Message.FORMAT, msg)
-        return Message(arbitration_id, data[:dlc], timestamp=timestamp)
+        msg = Message.from_bytes(data)
+        msg.timestamp = timestamp
+        return msg
 
     def send(self, msg: Message):
         return super().send(msg.to_bytes())
