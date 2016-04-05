@@ -145,7 +145,7 @@ def send_heartbeat():
 def heartbeat_consumer_timeout(id):
     global active_bus, canopen_od, nmt_state, node_id
     if nmt_state != CANopen.NMT_STATE_STOPPED:
-        msg = CAN.Message((CANopen.FUNCTION_CODE_EMCY << CANopen.FUNCTION_CODE_BITNUM) + node_id, (CANopen.EMCY_HEARTBEAT_BY_NODE + id).to_bytes(2, byteorder='big') + canopen_od.get(CANopen.ODI_ERROR).get(CANopen.ODSI_VALUE).to_bytes(1, byteorder='big') + b'\x00\x00\x00\x00\x00')
+        msg = CAN.Message(canopen_od.get(CANopen.ODI_EMCY_ID), (CANopen.EMCY_HEARTBEAT_BY_NODE + id).to_bytes(2, byteorder='big') + canopen_od.get(CANopen.ODI_ERROR).get(CANopen.ODSI_VALUE).to_bytes(1, byteorder='big') + b'\x00\x00\x00\x00\x00')
         active_bus.send(msg)
 
 def reset_timers():
@@ -217,7 +217,7 @@ while True:
                     CANopen.ODI_ERROR: 0x00,
                     CANopen.ODI_SYNC: 0x40000000 + (CANopen.FUNCTION_CODE_SYNC << CANopen.FUNCTION_CODE_BITNUM),
                     CANopen.ODI_SYNC_TIME: 0, # 32-bit, in us
-                    CANopen.ODI_EMCY_ID: (CANopen.FUNCTION_CODE_EMCY << CANopen.FUNCTION_CODE_BITNUM),
+                    CANopen.ODI_EMCY_ID: (CANopen.FUNCTION_CODE_EMCY << CANopen.FUNCTION_CODE_BITNUM) + node_id,
                     CANopen.ODI_HEARTBEAT_CONSUMER_TIME: CANopen.Object({
                         CANopen.ODSI_VALUE: 1,
                         CANopen.ODSI_HEARTBEAT_CONSUMER_TIME: 2000, # all nodes, 16-bit, in ms
