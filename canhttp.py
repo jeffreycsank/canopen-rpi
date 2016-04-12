@@ -11,8 +11,10 @@ from time import sleep
 import traceback
 from urllib.parse import parse_qs, urlparse
 
-DEFAULT_INTERFACE = "vcan0" # When no bus/interface is specified
-LISTEN_ON_INTERFACES = ["vcan0", "vcan1"] # Must be a list
+CAN_SEND_INTERFACE = "vcan0" # When no bus/interface is specified
+CAN_LISTEN_INTERFACES = ["vcan0", "vcan1"] # Must be a list
+HTTP_SERVER_IP_ADDRESS = "" # Empty string for any address
+HTTP_SERVER_PORT = 8000
 WWW_DIR = path.dirname(path.realpath(__file__))
 
 def sigterm_handler(signum, frame):
@@ -21,7 +23,7 @@ def sigterm_handler(signum, frame):
 def parse_request(request):
     interface = request.get('bus')
     if interface == None:
-        interface = DEFAULT_INTERFACE
+        interface = CAN_SEND_INTERFACE
     else:
         interface = interface[0]
     try:
@@ -76,7 +78,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
 
                 busses = []
-                for interface in LISTEN_ON_INTERFACES:
+                for interface in CAN_LISTEN_INTERFACES:
                     bus = CAN.Bus(interface)
                     busses.append(bus)
 
@@ -150,5 +152,5 @@ class RequestHandler(BaseHTTPRequestHandler):
         return # Suppress logging
 
 signal.signal(signal.SIGTERM, sigterm_handler)
-srvr = ThreadedHTTPServer(('', 8000), RequestHandler)
+srvr = ThreadedHTTPServer((HTTP_SERVER_IP_ADDRESS, HTTP_SERVER_PORT), RequestHandler)
 srvr.serve_forever()
