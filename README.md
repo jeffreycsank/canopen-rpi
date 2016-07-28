@@ -115,7 +115,6 @@ sudo apt-get install python3-rpi.gpio
     ````
 
 8. Setup webserver
-    * Copy contents of [GUI](/GUI) directory to `/home/pi/`
     * Copy [canhttp.py](/canhttp.py) to `/home/pi/`
     * Copy [canhttp](/canhttp) to `/etc/init.d/`
     * `sudo update-rc.d canhttp defaults`
