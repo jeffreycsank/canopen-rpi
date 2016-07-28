@@ -80,9 +80,9 @@ Add CAN Support
 
     ```
 dtparam=spi=on
-dtoverlay=mcp2515-can0-overlay,oscillator=16000000,interrupt=25
-dtoverlay=mcp2515-can1-overlay,oscillator=16000000,interrupt=24
-dtoverlay=spi-bcm2835-overlay
+dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25
+dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=24
+dtoverlay=spi-bcm2835
     ```
     *Note: The `oscillator` and `interrupt` parameters may be different for your application.*
 
