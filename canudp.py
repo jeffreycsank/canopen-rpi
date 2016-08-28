@@ -37,10 +37,10 @@ while True:
             socket_type = s.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
             if isinstance(s, CAN.Bus):
                 msg = s.recv()
-                for b in msg.to_bytes():
+                for b in bytes(msg):
                     print(hex(b))
                 print("-")
-                udp_socket.sendto(msg.to_bytes(), (UDP_SEND_IP, UDP_SEND_PORT))
+                udp_socket.sendto(bytes(msg), (UDP_SEND_IP, UDP_SEND_PORT))
             if socket_type == socket.SOCK_DGRAM:
                 msg = s.recv(CAN.Message.SIZE)
                 can_socket.send(CAN.Message.from_bytes(msg))

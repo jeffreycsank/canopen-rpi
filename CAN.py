@@ -49,7 +49,7 @@ class Message:
         self.arbitration_id = arbitration_id & 0x1FFFFFFF
         self.data = bytearray(data)
 
-    def to_bytes(self):
+    def __bytes__(self):
         arbitration_id = self.arbitration_id
         if self.id_type:
             arbitration_id |= 1 << self.IDE_BITNUM
@@ -105,10 +105,10 @@ class Bus(socket.socket):
         return msg
 
     def send(self, msg: Message):
-        return super().send(msg.to_bytes())
+        return super().send(bytes(msg))
 
     def sendall(self, msg: Message):
-        return super().sendall(msg.to_bytes())
+        return super().sendall(bytes(msg))
 
 
 class BusDown(Exception):

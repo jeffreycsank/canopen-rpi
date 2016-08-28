@@ -1,4 +1,12 @@
+#TODO: OSErrors are thrown if the CAN bus goes down, need to do threaded Exception handling
+#      See http://stackoverflow.com/questions/2829329/catch-a-threads-exception-in-the-caller-thread-in-python
+#TODO: Check for BUS-OFF before attempting to send
+
+import CAN
 from collections import Mapping, MutableMapping
+from select import select
+from threading import Event, Thread, Timer
+from time import sleep
 
 BROADCAST_NODE_ID = 0
 
@@ -143,11 +151,12 @@ SDO_ABORT_SUBINDEX_DNE = 0x06090011
 SDO_ABORT_GENERAL = 0x08000000
 
 # PDO
-TPDO_COMM_PARAM_RTR_BITNUM = 30
+TPDO_COMM_PARAM_ID_VALID_BITNUM = 31
+TPDO_COMM_PARAM_ID_RTR_BITNUM = 30
 
 class ObjectDictionary(MutableMapping):
     def __init__(self, other=None, **kwargs):
-        self.store = { # Defaults
+        self._store = { # Defaults
             ODI_DATA_TYPE_BOOLEAN: Object({
                 ODSI_VALUE: 0x00000001,
                 ODSI_STRUCTURE: (ODI_DATA_TYPE_UNSIGNED32 << OD_STRUCTURE_DATA_TYPE_BITNUM) + (OD_OBJECT_TYPE_DEFTYPE << OD_STRUCTURE_OBJECT_TYPE_BITNUM)
@@ -273,12 +282,14 @@ class ObjectDictionary(MutableMapping):
                 ODSI_DATA_TYPE_IDENTITY_SERIAL: ODI_DATA_TYPE_UNSIGNED32,
                 ODSI_STRUCTURE: (ODI_DATA_TYPE_UNSIGNED16 << OD_STRUCTURE_DATA_TYPE_BITNUM) + (OD_OBJECT_TYPE_DEFSTRUCT << OD_STRUCTURE_OBJECT_TYPE_BITNUM)
             }),
+            ODI_DEVICE_TYPE: None,
+            ODI_ERROR: None,
         }
         self.update(other, **kwargs)
 
     def __getitem__(self, index):
         # TODO: Prevent reading of write-only indices
-        obj = self.store[index]
+        obj = self._store[index]
 #        if len(obj) == 0:
 #            return obj.get(ODSI_VALUE)
         return obj
@@ -293,16 +304,16 @@ class ObjectDictionary(MutableMapping):
                 raise TypeError("CANopen object dictionary can only consist of CANopen objects or one of bool, int, float, or str")
             obj = Object({ODSI_VALUE: obj})
         # TODO: Prevent writing of read-only indices
-        self.store[index] = obj
+        self._store[index] = obj
 
     def __delitem__(self, index):
-        del self.store[index]
+        del self._store[index]
 
     def __iter__(self):
-        return iter(self.store)
+        return iter(self._store)
 
     def __len__(self):
-        return len(self.store)
+        return len(self._store)
 
     def update(self, other=None, **kwargs):
         if other is not None:
@@ -313,14 +324,14 @@ class ObjectDictionary(MutableMapping):
 
 class Object(MutableMapping):
     def __init__(self, other=None, **kwargs):
-        self.store = dict()
+        self._store = dict()
         self.update(dict(other, **kwargs))
         if ODSI_VALUE not in self:
             raise RuntimeError("CANopen object sub-index " + ODSI_VALUE + " is required")
 
     def __getitem__(self, subindex):
         # TODO: Prevent reading of write-only indices
-        return self.store[subindex]
+        return self._store[subindex]
 
     def __setitem__(self, subindex, value):
         if type(subindex) is not int:
@@ -330,32 +341,32 @@ class Object(MutableMapping):
         if type(value) not in [bool, int, float, str]:
             raise TypeError("CANopen objects can only be set to one of bool, int, float, or str")
         # TODO: Prevent writing of read-only indices
-        self.store[subindex] = value
+        self._store[subindex] = value
 
     def __delitem__(self, subindex):
-        del self.store[subindex]
+        del self._store[subindex]
 
     def __iter__(self):
-        return iter(self.store)
+        return iter(self._store)
 
     def __len__(self):
-        if ODSI_STRUCTURE in self.store:
-            structure = self.store[ODSI_STRUCTURE]
+        if ODSI_STRUCTURE in self._store:
+            structure = self._store[ODSI_STRUCTURE]
             data_type = (structure >> 8) & 0xFF
             object_type = structure & 0xFF
             if object_type in [OD_OBJECT_TYPE_ARRAY, OD_OBJECT_TYPE_RECORD]:
-                return len(self.store) - 2 # Don't count sub-indices 0x00 and 0xFF
-        return len(self.store) - 1 # Don't count sub-index 0
+                return len(self._store) - 2 # Don't count sub-indices 0x00 and 0xFF
+        return len(self._store) - 1 # Don't count sub-index 0
 
     def __getattr__(self, name):
         if name == "data_type":
-            if ODSI_STRUCTURE in self.store:
-                structure = self.store[ODSI_STRUCTURE]
+            if ODSI_STRUCTURE in self._store:
+                structure = self._store[ODSI_STRUCTURE]
                 data_type = (structure >> 8) & 0xFF
                 return data_type
         if name == "object_type":
-            if ODSI_STRUCTURE in self.store:
-                structure = self.store[ODSI_STRUCTURE]
+            if ODSI_STRUCTURE in self._store:
+                structure = self._store[ODSI_STRUCTURE]
                 object_type = structure & 0xFF
                 return object_type
         raise AttributeError("CANopen object does not contain attribute [" + name + "]")
@@ -366,3 +377,246 @@ class Object(MutableMapping):
                 self[subindex] = value
             for subindex, value in kwargs.items():
                 self[subindex] = value
+
+class IntervalTimer(Thread):
+    def __init__(self, interval, function, args=None, kwargs=None):
+        if args is None:
+            args = []
+        if kwargs is None:
+            kwargs = {}
+        super().__init__(args=args, kwargs=kwargs)
+        self._stopped = Event()
+        self._function = function
+        self.interval = interval
+
+    def cancel(self):
+        self._stopped.set()
+        while self.is_alive():
+            pass
+
+    def run(self):
+        while not self._stopped.wait(self.interval):
+            self._function(*self._args, **self._kwargs)
+
+    def start(self):
+        super().start()
+
+class Node:
+    def __init__(self, bus: CAN.Bus, id, od: ObjectDictionary):
+        self.bus = bus
+        if id > 0x7F or id < 0:
+            raise ValueError
+        self.id = id
+        self._default_od = od
+        self.od = self._default_od
+        self.nmt_state = NMT_STATE_INITIALISATION
+        self._heartbeat_consumer_timers = {}
+        self._heartbeat_producer_timer = None
+        self._sync_timer = None
+
+    def __del__(self):
+        self._reset_timers()
+
+    def _heartbeat_consumer_timeout(self, id):
+        if self.nmt_state != NMT_STATE_STOPPED:
+            emcy_id = self.od.get(ODI_EMCY_ID)
+            if emcy_id is not None:
+                msg = CAN.Message(emcy_id, (EMCY_HEARTBEAT_BY_NODE + id).to_bytes(2, byteorder='big') + self.od.get(ODI_ERROR).get(ODSI_VALUE).to_bytes(1, byteorder='big') + b'\x00\x00\x00\x00\x00')
+                self._send(msg)
+
+    def _process_heartbeat_producer(self):
+        heartbeat_producer_time_object = self.od.get(ODI_HEARTBEAT_PRODUCER_TIME)
+        if heartbeat_producer_time_object is not None:
+            heartbeat_producer_time = heartbeat_producer_time_object.get(ODSI_VALUE, 0) / 1000
+        else:
+            heartbeat_producer_time = 0
+        if self._heartbeat_producer_timer is not None and heartbeat_producer_time != self._heartbeat_producer_timer.interval:
+            self._heartbeat_producer_timer.cancel()
+        if heartbeat_producer_time != 0 and (self._heartbeat_producer_timer is None or not self._heartbeat_producer_timer.is_alive()):
+            self._heartbeat_producer_timer = IntervalTimer(heartbeat_producer_time, self._send_heartbeat)
+            self._heartbeat_producer_timer.start()
+
+    def _process_sync(self):
+        sync_object = self.od.get(ODI_SYNC)
+        if sync_object is not None:
+            is_sync_producer = (sync_object.get(ODSI_VALUE, 0) & 0x40000000) != 0
+        else:
+            is_sync_producer = False
+        sync_time_object = self.od.get(ODI_SYNC_TIME)
+        if sync_time_object is not None:
+            sync_time = sync_time_object.get(ODSI_VALUE, 0) / 1000000
+        else:
+            sync_time = 0
+        if self._sync_timer is not None and (sync_time != self._sync_timer.interval or self.nmt_state == NMT_STATE_STOPPED):
+            self._sync_timer.cancel()
+        if is_sync_producer and sync_time != 0 and self.nmt_state != NMT_STATE_STOPPED and (self._sync_timer is None or not self._sync_timer.is_alive()):
+            self._sync_timer = IntervalTimer(sync_time, self._send_sync)
+            self._sync_timer.start()
+
+    def _reset_timers(self):
+        for i,t in self._heartbeat_consumer_timers.items():
+            t.cancel()
+        self._heartbeat_consumer_timers = {}
+        if self._heartbeat_producer_timer is not None and self._heartbeat_producer_timer.is_alive():
+            self._heartbeat_producer_timer.cancel()
+        if self._sync_timer is not None and self._sync_timer.is_alive():
+            self._sync_timer.cancel()
+
+    def _send(self, msg: CAN.Message):
+        self.bus.send(msg)
+
+    def _send_bootup(self):
+        msg = CAN.Message((FUNCTION_CODE_NMT_ERROR_CONTROL << FUNCTION_CODE_BITNUM) + self.id)
+        self._send(msg)
+
+    def _send_heartbeat(self):
+        msg = CAN.Message((FUNCTION_CODE_NMT_ERROR_CONTROL << FUNCTION_CODE_BITNUM) + self.id, [self.nmt_state])
+        self._send(msg)
+
+    def _send_pdo(self, i):
+        i = i - 1
+        data = bytes()
+        tpdo_mp = self.od.get(ODI_TPDO1_MAPPING_PARAMETER + i)
+        if tpdo_mp is not None:
+            for j in range(tpdo_mp.get(ODSI_VALUE, 0)):
+                mapping_param = tpdo_mp.get(j + 1)
+                if mapping_param is not None:
+                    mapping_object = self.od.get(mapping_param >> 16)
+                    if mapping_object is not None:
+                        mapping_value = mapping_object.get((mapping_param >> 8) & 0xFF)
+                        if mapping_value is not None:
+                            data = data + mapping_value.to_bytes((mapping_param & 0xFF) // 8, byteorder='big')
+            msg = CAN.Message(((FUNCTION_CODE_TPDO1 + (2 * i)) << FUNCTION_CODE_BITNUM) + self.id, data)
+            self._send(msg)
+
+    def _send_sync(self):
+        sync_object = self.od.get(ODI_SYNC)
+        if sync_object is not None:
+            sync_value = sync_object.get(ODSI_VALUE)
+            if sync_value is not None:
+                sync_id = sync_value & 0x3FF
+                msg = CAN.Message(sync_id)
+                self._send(msg)
+
+    def listen(self):
+        while True:
+            try:
+                rlist, _, _, = select([self.bus], [], [])
+                for bus in rlist:
+                    msg = bus.recv()
+                    self.recv(msg)
+            except CAN.BusDown:
+                sleep(1)
+                continue
+
+    def boot(self):
+        self._send_bootup()
+        self.nmt_state = NMT_STATE_PREOPERATIONAL
+        self._process_heartbeat_producer()
+        self._process_sync()
+
+    def recv(self, msg: CAN.Message):
+        id = msg.arbitration_id
+        data = msg.data
+        rtr = msg.is_remote_frame
+        fc = (id >> FUNCTION_CODE_BITNUM) & 0xF
+        if rtr:
+            target_node = id & 0x7F
+            if target_node == self.id or target_node == BROADCAST_NODE_ID:
+                if self.nmt_state == NMT_STATE_OPERATIONAL:
+                    if fc == FUNCTION_CODE_TPDO1:
+                        tpdo1_cp = self.od.get(ODI_TPDO1_COMMUNICATION_PARAMETER)
+                        if tpdo1_cp is not None:
+                            tpdo1_cp_id = tpdo1_cp.get(ODSI_TPDO_COMM_PARAM_ID)
+                            if tpdo1_cp_id is not None and (tpdo1_cp_id >> TPDO_COMM_PARAM_ID_VALID_BITNUM) & 1 == 0 and (tpdo1_cp_id >> TPDO_COMM_PARAM_ID_RTR_BITNUM) & 1 == 0:
+                                self._send_pdo(1)
+                elif fc == FUNCTION_CODE_NMT_ERROR_CONTROL:
+                    self._send_heartbeat()
+        elif fc == FUNCTION_CODE_NMT:
+            command = id & 0x7F
+            if command == NMT_NODE_CONTROL:
+                target_node = data[1]
+                if target_node == self.id or target_node == BROADCAST_NODE_ID:
+                    cs = data[0]
+                    if cs == NMT_NODE_CONTROL_START:
+                        self.nmt_state = NMT_STATE_OPERATIONAL
+                    elif cs == NMT_NODE_CONTROL_STOP:
+                        self.nmt_state = NMT_STATE_STOPPED
+                    elif cs == NMT_NODE_CONTROL_PREOPERATIONAL:
+                        self.nmt_state = NMT_STATE_PREOPERATIONAL
+                    elif cs == NMT_NODE_CONTROL_RESET_NODE:
+                        self.reset()
+                    elif cs == NMT_NODE_CONTROL_RESET_COMMUNICATION:
+                        self.reset_communication()
+        elif fc == FUNCTION_CODE_SYNC and self.nmt_state == NMT_STATE_OPERATIONAL:
+            for i in range(4):
+                tpdo_cp = self.od.get(ODI_TPDO1_COMMUNICATION_PARAMETER + i)
+                if tpdo_cp is not None:
+                    tpdo_cp_id = tpdo_cp.get(ODSI_TPDO_COMM_PARAM_ID)
+                    if tpdo_cp_id is not None and (tpdo_cp_id >> TPDO_COMM_PARAM_ID_VALID_BITNUM) & 1 == 0:
+                        tpdo_cp_type = tpdo_cp.get(ODSI_TPDO_COMM_PARAM_TYPE)
+                        if tpdo_cp_type is not None and ((tpdo_cp_type >= 0 and tpdo_cp_type <= 240) or tpdo_cp_type == 252):
+                            self._send_pdo(i + 1)
+        elif fc == FUNCTION_CODE_SDO_RX and self.nmt_state != NMT_STATE_STOPPED:
+            sdo_server_object = self.od.get(ODI_SDO_SERVER)
+            if sdo_server_object is not None:
+                sdo_server_id = sdo_server_object.get(ODSI_SERVER_DEFAULT_CSID)
+                if sdo_server_id is not None and id == sdo_server_id:
+                    ccs = (data[0] >> SDO_CCS_BITNUM) & (2 ** SDO_CCS_LENGTH - 1)
+                    if len(data) >= 4:
+                        odi = (data[1] << 8) + data[2]
+                        odsi = data[3]
+                        if odi in self.od:
+                            obj = self.od.get(odi)
+                            if odsi in obj:
+                                if ccs == SDO_CCS_UPLOAD:
+                                    scs = SDO_SCS_UPLOAD
+                                    sdo_data = obj.get(odsi)
+                                elif ccs == SDO_CCS_DOWNLOAD:
+                                    scs = SDO_SCS_DOWNLOAD
+                                    n = (data[0] >> SDO_N_BITNUM) & (2 ** SDO_N_LENGTH - 1)
+                                    self.od.update({odi: int.from_bytes(data[4:], byteorder='big')}) # Could be data[4:7-n], or different based on data type
+                                    sdo_data = 0
+                                else:
+                                    scs = SDO_CS_ABORT
+                                    sdo_data = SDO_ABORT_INVALID_CS
+                            else:
+                                scs = SDO_CS_ABORT
+                                sdo_data = SDO_ABORT_SUBINDEX_DNE
+                        else:
+                            scs = SDO_CS_ABORT
+                            sdo_data = SDO_ABORT_OBJECT_DNE
+                    else:
+                        odi = 0x0000
+                        odsi = 0x00
+                        scs = SDO_CS_ABORT
+                        sdo_data = SDO_ABORT_GENERAL # Don't see one specifically for sending not enough data bytes in the CAN msg (malformed SDO msg)
+                    sdo_data = sdo_data.to_bytes(4, byteorder='big')
+                    n = 4 - len(sdo_data)
+                    data = [(scs << SDO_SCS_BITNUM) + (n << SDO_N_BITNUM) + (1 << SDO_E_BITNUM) + (1 << SDO_S_BITNUM), (odi >> 8), (odi & 0xFF), (odsi)] + list(sdo_data)
+                    msg = CAN.Message(sdo_server_id, data)
+                    self._send(msg)
+                elif fc == FUNCTION_CODE_NMT_ERROR_CONTROL:
+                    producer_id = id & 0x7F
+                    if producer_id in self._heartbeat_consumer_timers:
+                        self._heartbeat_consumer_timers.get(producer_id).cancel()
+                    heartbeat_consumer_time_object = self.od.get(ODI_HEARTBEAT_CONSUMER_TIME)
+                    if heartbeat_consumer_time_object is not None:
+                        heartbeat_consumer_time = heartbeat_consumer_time_object.get(ODSI_HEARTBEAT_CONSUMER_TIME, 0) / 1000
+                    else:
+                        heartbeat_consumer_time = 0
+                    if heartbeat_consumer_time != 0:
+                        heartbeat_consumer_timer = Timer(heartbeat_consumer_time, self._heartbeat_consumer_timeout, [producer_id])
+                        heartbeat_consumer_timer.start()
+                        self._heartbeat_consumer_timers.update({producer_id: heartbeat_consumer_timer})
+
+    def reset(self):
+        self.od = self._default_od
+        self.reset_communication()
+
+    def reset_communication(self):
+        self._reset_timers()
+        for odi, object in self._default_od.items():
+            if odi >= 0x1000 or odi <= 0x1FFF:
+                self.od.update({odi: object})
+        self.boot()
