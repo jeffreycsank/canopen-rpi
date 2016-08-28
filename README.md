@@ -1,7 +1,7 @@
 About
 ==========
 
-This repository actually contains two programs that complement each other, but can be used independently.  The first is a CANopen Master node (`canopen-master.py`) that acts as a SYNC producer, Heartbeat consumer, and EMCY producer.  The second is a CAN-to-HTTP webserver (`canhttp.py`) that translates CAN bus messages to a `text/event-stream`, and `HTTP GET` or `POST` requests into CAN bus messages.  The code supports up to two CAN busses, and if only one is used, some minor modifications are necessary.
+This repository contains two sets programs that complement each other, but can be used independently.  The first set is a CAN and CANopen modules and example node programs (`canopen-master.py` and `canopen-node.py`).  The node programs can be modified to implement any CANopen node.  The second set are CAN protocol adaptors for HTTP (`canhttp.py`, see below for API) and UDP (`canudp.py`, uses [SocketCAN](https://www.kernel.org/doc/Documentation/networking/can.txt) message structure).  Other adaptors can be derived using these as examples.
 
 Raspberry Pi Setup
 ==================
@@ -105,19 +105,46 @@ sudo ip link set can1 up type can bitrate 1000000
 sudo apt-get install can-utils
     ```
 
-Configure as CANopen Master
-----------------------------
+Library Usage
+-------------
 
-5. Install `python3-rpi.gpio`
+The simplest node can be run from the following code:
 
-    ```
-sudo apt-get install python3-rpi.gpio
-    ````
+```
+import CAN
+import CANopen
+
+NODE_ID = 1
+
+object_dictionary = CANopen.ObjectDictionary({ // Mandatory entries (with heartbeat protocol)
+    CANopen.ODI_DEVICE_TYPE: 0x00000000,
+    CANopen.ODI_ERROR: 0x00,
+    CANopen.ODI_HEARTBEAT_PRODUCER_TIME: 1000, # 16-bit, in ms
+    CANopen.ODI_IDENTITY: CANopen.Object({
+        CANopen.ODSI_VALUE: 4,
+        CANopen.ODSI_IDENTITY_VENDOR: 0x00000000,
+        CANopen.ODSI_IDENTITY_PRODUCT: 0x00000001,
+        CANopen.ODSI_IDENTITY_REVISION: 0x00000000,
+        CANopen.ODSI_IDENTITY_SERIAL: 0x00000001,
+    }),
+})
+
+node = CANopen.Node(CAN.Bus("vcan0"), NODE_ID, object_dictionary)
+node.boot() // Starts node, transmit only
+node.listen() // Allows node to listen to bus
+```
+
+Alternatively, `node.listen()` can be replaced with `node.recv(msg: CAN.Message)` to manually send messages to the node.  This is useful when there is a need to interface with the node's object dictionary (accessible from `node.od`), as `Node.listen()` is blocking and `Node.recv(msg: CAN.Message)` is not. 
+
+Example: Configure as CANopen Master with CAN-to-HTTP Adapter
+-------------------------------------------------------------
 
 8. Setup webserver
     * Copy [canhttp.py](/canhttp.py) to `/home/pi/`
     * Copy [canhttp](/canhttp) to `/etc/init.d/`
     * `sudo update-rc.d canhttp defaults`
+    
+8. Setup CAN-to-HTTP Adapter
     * Copy [canopen-master.py](/canopen-master.py) to `/home/pi/`
     * Copy [canopen-master](/canopen-master) to `/etc/init.d/`
     * `sudo update-rc.d canopen-master defaults`
