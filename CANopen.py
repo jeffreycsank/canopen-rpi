@@ -284,6 +284,7 @@ class ObjectDictionary(MutableMapping):
             }),
             ODI_DEVICE_TYPE: None,
             ODI_ERROR: None,
+            ODI_IDENTITY: None,
         }
         self.update(other, **kwargs)
 
@@ -381,7 +382,7 @@ class Object(MutableMapping):
 class IntervalTimer(Thread):
     def __init__(self, interval, function, args=None, kwargs=None):
         if args is None:
-            args = []
+            args = ()
         if kwargs is None:
             kwargs = {}
         super().__init__(args=args, kwargs=kwargs)
@@ -398,16 +399,86 @@ class IntervalTimer(Thread):
         while not self._stopped.wait(self.interval):
             self._function(*self._args, **self._kwargs)
 
-    def start(self):
-        super().start()
+class Indicator:
+    OFF = {'DutyCycle': 0, 'Frequency': 2.5}
+    FLASH1 = {'DutyCycle': 16.67, 'Frequency': 0.833}
+    #FLASH2 = {} Cannot accomplish with PWM
+    #FLASH3 = {} Cannot accomplish with PWM
+    BLINK = {'DutyCycle': 50, 'Frequency': 2.5}
+    FLICKER = {'DutyCycle': 50, 'Frequency': 10}
+    ON = {'DutyCycle': 100, 'Frequency': 2.5}
+
+    def __init__(self, channel, init_state):
+        import RPi.GPIO as GPIO
+        GPIO.setup(channel, GPIO.OUT)
+        self._pwm = GPIO.PWM(channel, init_state.get('Frequency'))
+        self._pwm.start(init_state.get('DutyCycle'))
+
+    def set_state(self, state):
+        self._pwm.ChangeDutyCycle(state.get('DutyCycle'))
+        self._pwm.ChangeFrequency(state.get('Frequency'))
+
+class ErrorIndicator(Indicator):
+    def __init__(self, channel, init_state=CAN.Bus.STATE_BUS_OFF, interval=1):
+        init_state = self._get_state(init_state)
+        self.interval = interval
+        super().__init__(channel, init_state)
+
+    def _get_state(self, err_state):
+        if err_state == CAN.Bus.STATE_ERROR_ACTIVE:
+            indicator_state = self.OFF
+        elif err_state == CAN.Bus.STATE_ERROR_PASSIVE:
+            indicator_state = self.FLASH1
+        else: # BUS-OFF or UNKNOWN
+            indicator_state = self.ON
+        return indicator_state
+
+    def set_state(self, err_state):
+        indicator_state = self._get_state(err_state)
+        super().set_state(indicator_state)
+
+class RunIndicator(Indicator):
+    def __init__(self, channel, init_state=NMT_STATE_INITIALISATION):
+        init_state = self._get_state(init_state)
+        super().__init__(channel, init_state)
+
+    def _get_state(self, nmt_state):
+        if nmt_state == NMT_STATE_PREOPERATIONAL:
+            indicator_state = self.BLINK
+        elif nmt_state == NMT_STATE_OPERATIONAL:
+            indicator_state = self.ON
+        elif nmt_state == NMT_STATE_STOPPED:
+            indicator_state = self.FLASH1
+        else:
+            indicator_state = self.OFF
+        return indicator_state
+
+    def set_state(self, nmt_state):
+        indicator_state = self._get_state(nmt_state)
+        super().set_state(indicator_state)
 
 class Node:
-    def __init__(self, bus: CAN.Bus, id, od: ObjectDictionary):
+    def __init__(self, bus: CAN.Bus, id, od: ObjectDictionary, *args, **kwargs):
         self.bus = bus
         if id > 0x7F or id < 0:
             raise ValueError
         self.id = id
         self._default_od = od
+
+        if "err_indicator" in kwargs:
+            if isinstance(kwargs["err_indicator"], ErrorIndicator):
+                self._err_indicator = kwargs["err_indicator"]
+                self._err_indicator_timer = IntervalTimer(self._err_indicator.interval , self._process_err_indicator)
+                self._err_indicator_timer.start()
+            else:
+                raise TypeError
+
+        if "run_indicator" in kwargs:
+            if isinstance(kwargs["run_indicator"], RunIndicator):
+                self._run_indicator = kwargs["run_indicator"]
+            else:
+                raise TypeError
+
         self.od = self._default_od
         self.nmt_state = NMT_STATE_INITIALISATION
         self._heartbeat_consumer_timers = {}
@@ -423,6 +494,10 @@ class Node:
             if emcy_id is not None:
                 msg = CAN.Message(emcy_id, (EMCY_HEARTBEAT_BY_NODE + id).to_bytes(2, byteorder='big') + self.od.get(ODI_ERROR).get(ODSI_VALUE).to_bytes(1, byteorder='big') + b'\x00\x00\x00\x00\x00')
                 self._send(msg)
+
+    def _process_err_indicator(self):
+        err_state = self.bus.get_state()
+        self._err_indicator.set_state(err_state)
 
     def _process_heartbeat_producer(self):
         heartbeat_producer_time_object = self.od.get(ODI_HEARTBEAT_PRODUCER_TIME)
@@ -498,16 +573,31 @@ class Node:
                 msg = CAN.Message(sync_id)
                 self._send(msg)
 
-    def listen(self):
+    @property
+    def nmt_state(self):
+        return self._nmt_state
+
+    @nmt_state.setter
+    def nmt_state(self, nmt_state):
+        self._nmt_state = nmt_state
+        try:
+            self._run_indicator.set_state(nmt_state)
+        except AttributeError:
+            pass
+
+    def listen(self, blocking=False):
+        if blocking:
+            self._listen()
+        else:
+            self._listener = Thread(target=self._listen)
+            self._listener.start()
+
+    def _listen(self):
         while True:
-            try:
-                rlist, _, _, = select([self.bus], [], [])
-                for bus in rlist:
-                    msg = bus.recv()
-                    self.recv(msg)
-            except CAN.BusDown:
-                sleep(1)
-                continue
+            rlist, _, _, = select([self.bus], [], [])
+            for bus in rlist:
+                msg = bus.recv()
+                self.recv(msg)
 
     def boot(self):
         self._send_bootup()

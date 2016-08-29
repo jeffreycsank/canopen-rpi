@@ -38,4 +38,4 @@ canopen_od = CANopen.ObjectDictionary({
 
 node = CANopen.Node(can_bus, node_id, canopen_od)
 node.boot()
-node.listen()
+node.listen(True) # Listen forever (blocking)
