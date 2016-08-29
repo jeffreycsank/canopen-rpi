@@ -131,10 +131,10 @@ object_dictionary = CANopen.ObjectDictionary({ // Mandatory entries (with heartb
 
 node = CANopen.Node(CAN.Bus("vcan0"), NODE_ID, object_dictionary)
 node.boot() // Starts node, transmit only
-node.listen() // Allows node to listen to bus
+node.listen(True) // Allows node to listen to bus
 ```
 
-Alternatively, `node.listen()` can be replaced with `node.recv(msg: CAN.Message)` to manually send messages to the node.  This is useful when there is a need to interface with the node's object dictionary (accessible from `node.od`), as `Node.listen()` is blocking and `Node.recv(msg: CAN.Message)` is not. 
+Alternatively, `node.listen(True)` can be replaced with `node.recv(msg: CAN.Message)` to manually send messages to the node, or `node.listen()` .  This is useful when there is a need to interface with the node's object dictionary (accessible from `node.od`) during operation, as `Node.listen(True)` is blocking and `Node.recv(msg: CAN.Message)` and `Node.listen()` are not. 
 
 Example: Configure as CANopen Master with CAN-to-HTTP Adapter
 -------------------------------------------------------------
