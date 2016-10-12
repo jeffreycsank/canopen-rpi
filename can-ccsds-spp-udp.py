@@ -12,8 +12,8 @@ from struct import pack
 import sys
 from time import time, mktime, sleep
 
-CAN_LISTEN_INTERFACES = ["can0", "can1"] # Must be a list
-CAN_SEND_INTERFACE = "can1"
+CAN_LISTEN_INTERFACES = ["vcan0", "vcan1"] # Must be a list
+CAN_SEND_INTERFACE = "vcan0"
 UDP_LOCAL_IP = "localhost"
 UDP_LOCAL_READ_PORT = 5084
 UDP_LOCAL_WRITE_PORT = 5082

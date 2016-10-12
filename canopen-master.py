@@ -20,27 +20,27 @@ PIN_RUNLED1 = 4
 PIN_ERRLED1 = 5
 
 #DEBUG on non-RPi ONLY
-from platform import machine
-if machine()[:3] != "arm":
-    GPIO.output(PIN_ENABLE_N, 0)
-    GPIO.output(PIN_ADDRESS_N[0], 0)
-    GPIO.output(PIN_ADDRESS_PARITY_N, 0)
+#from platform import machine
+#if machine()[:3] != "arm":
+#    GPIO.output(PIN_ENABLE_N, 0)
+#    GPIO.output(PIN_ADDRESS_N[0], 0)
+#    GPIO.output(PIN_ADDRESS_PARITY_N, 0)
 
 def sigterm_handler(signum, frame):
-    GPIO.cleanup()
+#    GPIO.cleanup()
     exit()
 
 signal.signal(signal.SIGTERM, sigterm_handler)
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(PIN_ENABLE_N, GPIO.IN)
-GPIO.setup(PIN_ADDRESS_N, GPIO.IN)
-GPIO.setup(PIN_ADDRESS_PARITY_N, GPIO.IN)
+#GPIO.setmode(GPIO.BCM)
+#GPIO.setup(PIN_ENABLE_N, GPIO.IN)
+#GPIO.setup(PIN_ADDRESS_N, GPIO.IN)
+#GPIO.setup(PIN_ADDRESS_PARITY_N, GPIO.IN)
 
-runled0 = CANopen.RunIndicator(PIN_RUNLED0)
-errled0 = CANopen.ErrorIndicator(PIN_ERRLED0)
-runled1 = CANopen.Indicator(PIN_RUNLED1, CANopen.Indicator.OFF)
-errled1 = CANopen.Indicator(PIN_ERRLED1, CANopen.Indicator.ON)
+#runled0 = CANopen.RunIndicator(PIN_RUNLED0)
+#errled0 = CANopen.ErrorIndicator(PIN_ERRLED0)
+#runled1 = CANopen.Indicator(PIN_RUNLED1, CANopen.Indicator.OFF)
+#errled1 = CANopen.Indicator(PIN_ERRLED1, CANopen.Indicator.ON)
 
 default_bus = CAN.Bus(DEFAULT_CAN_INTERFACE)
 redundant_bus = CAN.Bus(REDUNDANT_CAN_INTERFACE)
@@ -54,22 +54,22 @@ class ResetCommunication(Exception):
 
 while True:
     try:
-        if GPIO.input(PIN_ENABLE_N) == GPIO.HIGH:
-            raise ResetNode
+#        if GPIO.input(PIN_ENABLE_N) == GPIO.HIGH:
+#            raise ResetNode
         while True:
             try:
-                address_n = [
-                    GPIO.input(PIN_ADDRESS_N[6]),
-                    GPIO.input(PIN_ADDRESS_N[5]),
-                    GPIO.input(PIN_ADDRESS_N[4]),
-                    GPIO.input(PIN_ADDRESS_N[3]),
-                    GPIO.input(PIN_ADDRESS_N[2]),
-                    GPIO.input(PIN_ADDRESS_N[1]),
-                    GPIO.input(PIN_ADDRESS_N[0])]
-                address_parity_n = reduce(xor, address_n)
-                if address_parity_n != GPIO.input(PIN_ADDRESS_PARITY_N):
-                    raise ResetCommunication
-
+#                address_n = [
+#                    GPIO.input(PIN_ADDRESS_N[6]),
+#                    GPIO.input(PIN_ADDRESS_N[5]),
+#                    GPIO.input(PIN_ADDRESS_N[4]),
+#                    GPIO.input(PIN_ADDRESS_N[3]),
+#                    GPIO.input(PIN_ADDRESS_N[2]),
+#                    GPIO.input(PIN_ADDRESS_N[1]),
+#                    GPIO.input(PIN_ADDRESS_N[0])]
+#                address_parity_n = reduce(xor, address_n)
+#                if address_parity_n != GPIO.input(PIN_ADDRESS_PARITY_N):
+#                    raise ResetCommunication
+                address_n = [1,1,1,1,1,1,0]
                 node_id = 0
                 for bit in address_n:
                     node_id = (node_id << 1) | (not bit)
@@ -115,7 +115,8 @@ while True:
                 try:
                     node.boot()
                 except NameError:
-                    node = CANopen.Node(active_bus, node_id, canopen_od, run_indicator=runled0, err_indicator=errled0)
+                    #node = CANopen.Node(active_bus, node_id, canopen_od, run_indicator=runled0, err_indicator=errled0)
+                    node = CANopen.Node(active_bus, node_id, canopen_od)
                     node.boot()
 
                 try:
